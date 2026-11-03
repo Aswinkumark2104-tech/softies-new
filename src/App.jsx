@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, ShoppingBag, Heart, Menu, X, Star, ArrowRight, Sparkles,
   Truck, ShieldCheck, Gift, Plus, Minus, Trash2, UserRound, SlidersHorizontal,
-  PackageCheck, Mail, Instagram, Facebook, CircleHelp
+  Instagram, CircleHelp
 } from 'lucide-react';
 import { supabase, supabaseConfigured } from './supabase';
 import { sendOrderConfirmation } from './emailNotifications';
@@ -29,7 +29,7 @@ const categories = [
 const money = n => new Intl.NumberFormat('en-IN', { style:'currency', currency:'INR', maximumFractionDigits:0 }).format(n);
 
 function App() {
-  const [products, setProducts] = useState(seedProducts);
+  const [products, setProducts] = useState(supabaseConfigured ? [] : seedProducts);
   const [category, setCategory] = useState('All Toys');
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState('featured');
@@ -45,13 +45,6 @@ function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [user, setUser] = useState(null);
-  const [adminOpen, setAdminOpen] = useState(false);
-  const isAdminRoute = window.location.pathname.replace(/\/+$/, '') === '/admin';
-  const adminEmail = (import.meta.env.VITE_ADMIN_EMAIL || '').trim().toLowerCase();
-  const [adminMode, setAdminMode] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newPrice, setNewPrice] = useState('');
-  const [newCategory, setNewCategory] = useState('Educational Toys');
   const [orderBusy, setOrderBusy] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [checkoutDetails, setCheckoutDetails] = useState({ customer_name:'', phone:'', address:'', area:'', city:'', state:'Tamil Nadu', pincode:'', payment_method:'COD' });
@@ -64,41 +57,39 @@ function App() {
   useEffect(() => localStorage.setItem('softies-wishlist', JSON.stringify(wishlist)), [wishlist]);
 
   useEffect(() => {
-    if (!supabaseConfigured) return;
-    let alive = true;
-    (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (alive) setUser(session?.user || null);
-      const { data } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user || null));
-      return () => data.subscription.unsubscribe();
-    })();
-    (async () => {
-      const { data, error } = await supabase.from('products').select('*').eq('is_active', true).order('created_at', { ascending:false });
-      if (!error && data?.length) setProducts(data.map(p => ({...p, emoji:p.emoji || '🧸', color:p.color || '#fff0bd', rating:p.rating || 4.8})));
-    })();
-    return () => { alive = false; };
+    const sent = new Set();
+    const onScroll = () => {
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      if (max <= 0 || !window.gtag) return;
+      const percent = Math.round((window.scrollY / max) * 100);
+      [50, 90].forEach(mark => { if (percent >= mark && !sent.has(mark)) { sent.add(mark); window.gtag('event', 'scroll', { percent_scrolled: mark }); } });
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
   useEffect(() => {
-    if (!isAdminRoute) return;
-    if (!user) {
-      setAuthOpen(true);
-      setAdminMode(false);
-      return;
-    }
-    setAuthOpen(false);
-    if (!adminEmail) {
-      setAdminMode(false);
-      setNotice('Admin access is not configured yet. Add VITE_ADMIN_EMAIL to your .env file.');
-      return;
-    }
-    if (user.email?.toLowerCase() === adminEmail) {
-      setAdminMode(true);
-    } else {
-      setAdminMode(false);
-      setNotice('Access denied: this account is not configured as the SOFTIES admin.');
-    }
-  }, [isAdminRoute, user, adminEmail]);
+    if (!supabaseConfigured) return;
+    let alive = true;
+    let authSubscription;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (alive) setUser(session?.user || null);
+      const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+        if (alive) setUser(nextSession?.user || null);
+      });
+      authSubscription = data.subscription;
+      if (!alive) authSubscription.unsubscribe();
+    })();
+    (async () => {
+      const { data, error } = await supabase.from('products').select('*').eq('is_active', true).order('created_at', { ascending:false });
+      if (!alive) return;
+      if (!error) setProducts((data || []).map(p => ({...p, old_price: p.offer_price && Number(p.offer_price) > 0 && Number(p.offer_price) < Number(p.price) ? Number(p.price) : null, price: p.offer_price && Number(p.offer_price) > 0 && Number(p.offer_price) < Number(p.price) ? Number(p.offer_price) : Number(p.price), stock: Number(p.stock_quantity || 0), emoji:p.emoji || '🧸', color:p.color || '#fff0bd', rating:p.rating || 4.8})));
+      else console.error('SOFTIES product catalogue:', error.message);
+    })();
+    return () => { alive = false; authSubscription?.unsubscribe(); };
+  }, []);
+
 
   useEffect(() => {
     if (!notice) return;
@@ -119,6 +110,7 @@ function App() {
   const total = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
   const recommended = products.filter(p => (age === 'Any age' || p.age === age || p.age === 'All ages') && (budget === 'Any budget' || p.price <= Number(budget)));
   const addToCart = p => {
+    if (window.gtag) window.gtag('event', 'add_to_cart', { currency:'INR', value:Number(p.price || 0), items:[{item_id:String(p.id), item_name:p.name, item_category:p.category, price:Number(p.price || 0), quantity:1}] });
     setCart(old => {
       const existing = old.find(i => i.id === p.id);
       return existing ? old.map(i => i.id === p.id ? {...i, qty:i.qty+1} : i) : [...old, {...p, qty:1}];
@@ -147,17 +139,102 @@ function App() {
     const { error } = await supabase.auth.signUp({ email, password });
     setNotice(error ? error.message : 'Check your email to confirm your account.');
   };
+  const resetPassword = async () => {
+    if (!supabaseConfigured) return setNotice('Connect Supabase first.');
+    if (!email.trim()) return setNotice('Enter your email address first.');
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: `${window.location.origin}/account` });
+    setNotice(error ? error.message : 'Password reset email requested. Check your inbox and spam folder.');
+  };
+
   const signOut = async () => {
     if (supabaseConfigured) await supabase.auth.signOut();
-    setUser(null); setAdminMode(false); setNotice('You have signed out.');
+    setUser(null); setNotice('You have signed out.');
   };
 
   const checkout = () => {
     if (!cart.length) return;
     if (!user) { setCartOpen(false); setAuthOpen(true); setNotice('Sign in before continuing to checkout.'); return; }
+    if (window.gtag) window.gtag('event', 'begin_checkout', { currency:'INR', value:total, items:cart.map(i=>({item_id:String(i.id),item_name:i.name,item_category:i.category,price:Number(i.price),quantity:i.qty})) });
     setCheckoutDetails(old => ({...old, customer_name:old.customer_name || user.user_metadata?.full_name || user.user_metadata?.name || '', phone:old.phone || user.user_metadata?.phone || ''}));
     setCartOpen(false);
     setCheckoutOpen(true);
+  };
+
+  const startRazorpayPayment = async (fullAddress) => {
+    const { data, error } = await supabase.functions.invoke('create-razorpay-order', {
+      body: {
+        customer: { ...checkoutDetails, address: checkoutDetails.address.trim(), area: checkoutDetails.area.trim() },
+        items: cart.map(item => ({ id: item.id, quantity: item.qty }))
+      }
+    });
+    if (error) throw new Error(error.message || 'Could not create Razorpay order.');
+    if (data?.error) throw new Error(data.error);
+    if (!data?.razorpay_order_id || !data?.key_id) throw new Error('Razorpay did not return a valid order.');
+
+    if (!window.Razorpay) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Could not load Razorpay Checkout. Check your internet connection.'));
+        document.body.appendChild(script);
+      });
+    }
+
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = () => { if (!finished) { finished = true; resolve(); } };
+      const checkout = new window.Razorpay({
+        key: data.key_id,
+        amount: data.amount,
+        currency: data.currency || 'INR',
+        name: 'SOFTIES',
+        description: data.description || 'SOFTIES toy order',
+        order_id: data.razorpay_order_id,
+        prefill: data.customer,
+        notes: { softies_order_id: String(data.internal_order_id), delivery_address: fullAddress },
+        theme: { color: '#8b5cf6' },
+        handler: async (response) => {
+          try {
+            const { data: verified, error: verifyError } = await supabase.functions.invoke('verify-razorpay-payment', {
+              body: {
+                internal_order_id: data.internal_order_id,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature
+              }
+            });
+            if (verifyError) throw new Error(verifyError.message || 'Payment verification failed.');
+            if (!verified?.verified) throw new Error(verified?.error || 'Payment could not be verified.');
+            const paidOrder = {
+              id: data.internal_order_id, tracking_id: verified.tracking_id, email: user.email,
+              customer_email: user.email, customer_name: checkoutDetails.customer_name,
+              phone: checkoutDetails.phone, address: fullAddress, total_amount: data.total_amount,
+              items: cart.map(i => ({ name: i.name, quantity: i.qty, price: i.price })),
+              payment_method: 'RAZORPAY', payment_status: 'PAID', order_status: 'CONFIRMED'
+            };
+            let emailSent = false;
+            try { const mail = await sendOrderConfirmation(paidOrder); emailSent = Boolean(mail?.sent); }
+            catch (mailError) { console.error('SOFTIES payment confirmation email failed:', mailError); }
+            if (window.gtag) window.gtag('event', 'purchase', {
+              transaction_id: String(data.internal_order_id), value: Number(data.total_amount), currency: 'INR', payment_type: 'RAZORPAY',
+              items: cart.map(i => ({ item_name: i.name, price: i.price, quantity: i.qty }))
+            });
+            setCart([]); setCheckoutOpen(false); setHoldProgress(0);
+            setNotice(`Payment successful! Order #${data.internal_order_id} is confirmed. ${emailSent ? 'Confirmation email sent.' : 'Email confirmation could not be sent; check EmailJS settings.'}`);
+          } catch (err) {
+            console.error('SOFTIES payment verification:', err);
+            setNotice(err.message || 'Payment received, but verification is pending. Contact SOFTIES before paying again.');
+          } finally { finish(); }
+        },
+        modal: { ondismiss: () => { setNotice('Payment window closed. Your order remains unpaid. You can try again.'); finish(); } }
+      });
+      checkout.on('payment.failed', (response) => {
+        const message = response?.error?.description || 'Payment failed. Please try again.';
+        setNotice(message);
+      });
+      checkout.open();
+    });
   };
 
   const placeOrder = async () => {
@@ -168,31 +245,29 @@ function App() {
       setHoldProgress(0);
       return;
     }
-    if (d.payment_method !== 'COD') {
-      setNotice('Online payment is not activated yet. Please choose Cash on Delivery (COD).');
-      setHoldProgress(0);
-      return;
-    }
     setOrderBusy(true);
     try {
       if (!supabaseConfigured) throw new Error('Connect Supabase before placing real orders.');
       const fullAddress = `${d.address.trim()}, ${d.area.trim()}, ${d.city.trim()}, ${d.state.trim()} - ${d.pincode.trim()}`;
-      const { data: order, error: orderError } = await supabase.from('orders').insert({
-        user_id:user.id, email:user.email, customer_name:d.customer_name.trim(), phone:d.phone.trim(),
-        address:fullAddress, city:d.city.trim(), state:d.state.trim(), pincode:d.pincode.trim(),
-        total_amount:total, payment_method:'COD', payment_status:'PENDING', order_status:'PLACED'
-      }).select().single();
-      if (orderError) throw orderError;
-      const tracking_id = `SOF-${String(order.id).padStart(6, '0')}`;
-      const { error: trackingError } = await supabase.from('orders').update({tracking_id}).eq('id', order.id);
-      if (trackingError) throw trackingError;
-      const rows = cart.map(i => ({ order_id:order.id, product_id:(typeof i.id==='string' && /^[0-9a-f-]{36}$/i.test(i.id))?i.id:null, product_name:i.name, unit_price:i.price, quantity:i.qty }));
-      const { error: itemsError } = await supabase.from('order_items').insert(rows);
-      if (itemsError) throw itemsError;
-      const confirmedOrder = {...order, tracking_id, email:user.email, customer_name:d.customer_name.trim(), phone:d.phone.trim(), address:fullAddress};
+      if (d.payment_method === 'RAZORPAY') {
+        await startRazorpayPayment(fullAddress);
+        return;
+      }
+      const { data: created, error: createError } = await supabase.functions.invoke('create-cod-order', {
+        body: {
+          customer: { ...d, customer_name:d.customer_name.trim(), phone:d.phone.trim(), address:d.address.trim(), area:d.area.trim(), city:d.city.trim(), state:d.state.trim(), pincode:d.pincode.trim() },
+          items: cart.map(item => ({ id:item.id, quantity:item.qty }))
+        }
+      });
+      if (createError) throw new Error(createError.message || 'Could not place the COD order.');
+      if (created?.error) throw new Error(created.error);
+      const order = created?.order;
+      if (!order?.id) throw new Error('The server did not return a saved order. Please contact SOFTIES before retrying.');
+      const tracking_id = order.tracking_id || `SOF-${String(order.id).padStart(6, '0')}`;
+      const confirmedOrder = {...order, email:user.email, customer_email:user.email, customer_name:d.customer_name.trim(), phone:d.phone.trim(), address:fullAddress, tracking_id, items:cart.map(i => ({ name:i.name, quantity:i.qty, price:i.price })), order_status:order.order_status || 'PLACED'};
       let orderEmailSent = false;
       try { const mailResult = await sendOrderConfirmation(confirmedOrder); orderEmailSent = Boolean(mailResult?.sent); } catch (mailError) { console.error('SOFTIES order confirmation email failed:', mailError); }
-      if (window.gtag) window.gtag('event','purchase',{transaction_id:String(order.id),value:total,currency:'INR',payment_type:'COD',items:cart.map(i=>({item_name:i.name,price:i.price,quantity:i.qty}))});
+      if (window.gtag) window.gtag('event','purchase',{transaction_id:String(order.id),value:Number(order.total_amount || total),currency:'INR',payment_type:'COD',items:cart.map(i=>({item_name:i.name,price:i.price,quantity:i.qty}))});
       setCart([]); setCheckoutOpen(false); setHoldProgress(0);
       setNotice(`Order ${String(order.id).slice(0,8)} placed! Tracking ID ${tracking_id}. ${orderEmailSent ? 'Confirmation email sent.' : 'Email not configured yet; see SETUP.md.'} Track it in My Account.`);
     } catch (err) { setNotice(err.message || 'Could not create order.'); }
@@ -224,21 +299,6 @@ function App() {
     if (!holdComplete.current && holdProgress < 100) setHoldProgress(0);
   };
 
-  const addProduct = async e => {
-    e.preventDefault();
-    if (!user || !adminEmail || user.email?.toLowerCase() !== adminEmail) return setNotice('Admin access required.');
-    if (!newName.trim() || Number(newPrice) <= 0) return setNotice('Enter a product name and valid price.');
-    const p = { name:newName.trim(), price:Number(newPrice), category:newCategory, description:'A lovely new toy from SOFTIES.', stock:10, stock_quantity:10, is_active:true, emoji:'🧸', color:'#fff0bd' };
-    if (supabaseConfigured && user) {
-      const { data, error } = await supabase.from('products').insert(p).select().single();
-      if (error) return setNotice(error.message);
-      setProducts(old => [data, ...old]);
-    } else {
-      setProducts(old => [{...p, id:`local-${Date.now()}`, rating:4.8}, ...old]);
-      setNotice('Demo product added locally. Connect Supabase to save it permanently.');
-    }
-    setNewName(''); setNewPrice('');
-  };
 
   const ProductCard = ({p}) => (
     <motion.article className="product-card" whileHover={{y:-7}} transition={{type:'spring', stiffness:260, damping:18}}>
@@ -250,10 +310,10 @@ function App() {
       </div>
       <div className="product-info">
         <div className="product-category">{p.category}</div>
-        <h3>{p.name}</h3>
-        <div className="rating"><Star size={14} fill="currentColor" /> {p.rating || '4.8'} <span>({p.stock ?? 10} in stock)</span></div>
+        <h3 onClick={()=>{if(window.gtag){const item={item_id:String(p.id),item_name:p.name,item_category:p.category,price:Number(p.price||0)};window.gtag('event','select_item',{items:[item]});window.gtag('event','view_item',{currency:'INR',value:Number(p.price||0),items:[item]});}}}>{p.name}</h3>
+        <div className="rating"><Star size={14} fill="currentColor" /> {p.rating || '4.8'} <span>({p.stock ?? p.stock_quantity ?? 0} in stock)</span></div>
         <div className="price-row"><strong>{money(p.price)}</strong>{p.old_price && <del>{money(p.old_price)}</del>}</div>
-        <button className="add-btn" onClick={() => addToCart(p)}><Plus size={17}/> Add to Bag</button>
+        <button className="add-btn" disabled={Number(p.stock ?? p.stock_quantity ?? 1) <= 0 || p.is_active === false} onClick={() => addToCart(p)}>{Number(p.stock ?? p.stock_quantity ?? 1) <= 0 ? 'Sold out' : <><Plus size={17}/> Add to Bag</>}</button>
       </div>
     </motion.article>
   );
@@ -265,14 +325,13 @@ function App() {
       <a className="brand" href="#" aria-label="SOFTIES Toy Store home" onClick={e=>{e.preventDefault();window.scrollTo({top:0,behavior:'smooth'});}}><img className="brand-logo" src="/softies-logo.jpg" alt="SOFTIES Toy Store — Play. Learn. Grow. Together." /></a>
       <nav className={mobileMenu?'nav nav-open':'nav'}>
         <a href="#home" onClick={()=>setMobileMenu(false)}>Home</a>
-        <a href="#categories" onClick={()=>setMobileMenu(false)}>Categories</a>
         <a href="#shop" onClick={()=>setMobileMenu(false)}>Shop All</a>
         <a href="#about" onClick={()=>setMobileMenu(false)}>Our Story</a>
       </nav>
       <div className="header-actions">
-        <label className="search-box"><Search size={17}/><input value={query} onChange={e=>{setQuery(e.target.value);document.getElementById('shop')?.scrollIntoView({behavior:'smooth'});}} placeholder="Find a little joy..." /></label>
+        <label className="search-box"><Search size={17}/><input value={query} onChange={e=>{setQuery(e.target.value);if(window.gtag && e.target.value.trim())window.gtag('event','search',{search_term:e.target.value.trim()});document.getElementById('shop')?.scrollIntoView({behavior:'smooth'});}} placeholder="Find a little joy..." /></label>
         <button className="icon-btn account-btn" onClick={()=>{window.location.href='/account';}} aria-label="My account and orders"><UserRound/></button>
-        <button className="icon-btn cart-icon" onClick={()=>setCartOpen(true)} aria-label="Shopping bag"><ShoppingBag/><span>{cartCount}</span></button>
+        <button className="icon-btn cart-icon" onClick={()=>{if(window.gtag)window.gtag('event','view_cart',{currency:'INR',value:total,items:cart.map(i=>({item_id:String(i.id),item_name:i.name,price:Number(i.price),quantity:i.qty}))});setCartOpen(true);}} aria-label="Shopping bag"><ShoppingBag/><span>{cartCount}</span></button>
       </div>
     </header>
 
@@ -323,7 +382,7 @@ function App() {
       </section>
 
       <section className="section why-section" id="about">
-        <div className="why-intro"><span className="eyebrow">A LITTLE ABOUT US</span><h2>Growing through <em>play.</em></h2><p>We believe play is where big ideas begin. SOFTIES brings together joyful toys that invite children to imagine, build, create and explore.</p><button className="text-btn" onClick={()=>setNotice('Our story: helping little imaginations grow, one playful moment at a time.')}>Our little story <ArrowRight size={16}/></button></div>
+        <div className="why-intro"><span className="eyebrow">A LITTLE ABOUT US</span><h2>Growing through <em>play.</em></h2><p>To make every child’s playtime meaningful by offering toys that inspire learning, creativity, confidence, and imagination. We encourage families to review each toy’s description, recommended age and product safety information before buying.</p><button className="text-btn" onClick={()=>setNotice('Our story: helping little imaginations grow, one playful moment at a time.')}>Our little story <ArrowRight size={16}/></button></div>
         <div className="why-cards"><div className="why-card green"><span>🌱</span><h3>Room to Grow</h3><p>Ideas and skills grow through playful discovery.</p></div><div className="why-card pink"><span>💗</span><h3>Joy in Every Box</h3><p>Thoughtful picks for everyday fun and gifting.</p></div><div className="why-card yellow"><span>🌟</span><h3>Wonder Every Day</h3><p>Inspiring toys for curious little explorers.</p></div></div>
       </section>
 
@@ -331,19 +390,19 @@ function App() {
     </main>
 
     <a className="floating-whatsapp" href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20would%20like%20to%20know%20about%20your%20toys." target="_blank" rel="noreferrer" aria-label="Chat with SOFTIES on WhatsApp"><span>☏</span><b>Chat with us</b></a>
-    <footer className="footer"><div className="footer-main"><div className="footer-brand"><a className="brand footer-logo-link" href="#home" aria-label="SOFTIES Toy Store home"><img className="brand-logo footer-logo" src="/softies-logo.jpg" alt="SOFTIES Toy Store logo" /></a><p>Little toys, big imagination.<br/>Here's to more playful days.</p><div className="socials"><a href="https://www.instagram.com/softies__uz/" target="_blank" rel="noreferrer" aria-label="Visit SOFTIES on Instagram"><Instagram/></a><a href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20would%20like%20to%20know%20about%20your%20toys." target="_blank" rel="noreferrer" aria-label="Chat with SOFTIES on WhatsApp" className="whatsapp-social">WA</a><a href="mailto:hello@softies.example" aria-label="Email"><Mail/></a></div></div><div><h4>Let's Explore</h4><a href="#shop" onClick={()=>setCategory('All Toys')}>Shop all toys</a>{categories.map(c=><a key={c.name} href="#shop" onClick={()=>setCategory(c.name)}>{c.name}</a>)}</div><div><h4>Here to Help</h4><a href="#contact">Contact us</a><a href="#contact">Delivery information</a><a href="#contact">Returns & refunds</a><a href="#contact">FAQs</a><a href="/account">My account &amp; order tracking</a></div><div id="contact"><h4>Need a hand?</h4><p>Questions about a toy or an order?</p><a className="footer-help" href="mailto:hello@softies.example"><CircleHelp size={17}/> Get in touch</a><a className="footer-help whatsapp-help" href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20need%20help%20with%20a%20toy%20or%20order." target="_blank" rel="noreferrer">Chat on WhatsApp · 9092096062</a></div></div><div className="footer-bottom"><span>© {new Date().getFullYear()} SOFTIES. Growing through play.</span><span>Privacy · Terms · Returns</span><span>Made with a little ✦ magic</span></div></footer>
+    <footer className="footer"><div className="footer-main"><div className="footer-brand"><a className="brand footer-logo-link" href="#home" aria-label="SOFTIES Toy Store home"><img className="brand-logo footer-logo" src="/softies-logo.jpg" alt="SOFTIES Toy Store logo" /></a><p>Little toys, big imagination.<br/>Here's to more playful days.</p><div className="socials"><a href="https://www.instagram.com/softies__uz/" target="_blank" rel="noreferrer" aria-label="Visit SOFTIES on Instagram"><Instagram/></a><a href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20would%20like%20to%20know%20about%20your%20toys." target="_blank" rel="noreferrer" aria-label="Chat with SOFTIES on WhatsApp" className="whatsapp-social">WA</a></div></div><div><h4>Let's Explore</h4><a href="#shop" onClick={()=>setCategory('All Toys')}>Shop all toys</a><a href="#about">Our story</a><a href="/account">My orders</a></div><div><h4>Here to Help</h4><a href="#contact">Contact us</a><a href="#contact">Delivery information</a><a href="#contact">Returns & refunds</a><a href="#contact">FAQs</a><a href="/account">My account &amp; order tracking</a></div><div id="contact"><h4>Need a hand?</h4><p>Questions about a toy or an order?</p><a className="footer-help" href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20need%20help." target="_blank" rel="noreferrer"><CircleHelp size={17}/> Get in touch on WhatsApp</a><a className="footer-help whatsapp-help" href="https://wa.me/919092096062?text=Hello%20SOFTIES%2C%20I%20need%20help%20with%20a%20toy%20or%20order." target="_blank" rel="noreferrer">Chat on WhatsApp · 9092096062</a></div></div><div className="footer-bottom"><span>© {new Date().getFullYear()} SOFTIES. Growing through play.</span><span>Privacy · Terms · Returns</span><span>Made with a little ✦ magic</span></div></footer>
 
     <AnimatePresence>{notice && <motion.div className="toast" initial={{opacity:0,y:15}} animate={{opacity:1,y:0}} exit={{opacity:0,y:10}}><Sparkles size={17}/>{notice}</motion.div>}</AnimatePresence>
 
-    <AnimatePresence>{cartOpen && <motion.div className="overlay" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setCartOpen(false)}><motion.aside className="drawer" initial={{x:420}} animate={{x:0}} exit={{x:420}} onClick={e=>e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">YOUR LITTLE FINDS</span><h2>Shopping bag <span>({cartCount})</span></h2></div><button className="icon-btn" onClick={()=>setCartOpen(false)}><X/></button></div>{!cart.length?<div className="empty-state"><span>🛍️</span><h3>Your bag is taking a nap</h3><p>Add a little joy to wake it up.</p><button className="primary-btn" onClick={()=>{setCartOpen(false);scrollShop();}}>Explore toys</button></div>:<><div className="cart-items">{cart.map(i=><div className="cart-item" key={i.id}><div className="cart-thumb" style={{background:i.color}}>{i.emoji}</div><div className="cart-item-info"><b>{i.name}</b><strong>{money(i.price)}</strong><div className="qty-control"><button onClick={()=>updateQty(i.id,-1)}><Minus size={13}/></button><span>{i.qty}</span><button onClick={()=>updateQty(i.id,1)}><Plus size={13}/></button></div></div><button className="remove-btn" onClick={()=>updateQty(i.id,-i.qty)} aria-label="Remove item"><Trash2 size={17}/></button></div>)}</div><div className="cart-summary"><div><span>Subtotal</span><b>{money(total)}</b></div><small>Delivery charges, if any, are calculated at checkout.</small><button className="primary-btn checkout-btn" onClick={checkout} disabled={orderBusy}>{orderBusy?'Creating order...':'Continue to checkout'} <ArrowRight size={17}/></button><p className="secure-note"><ShieldCheck size={15}/> Secure checkout after payment setup</p></div></>}</motion.aside></motion.div>}</AnimatePresence>
+    <AnimatePresence>{cartOpen && <motion.div className="overlay" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setCartOpen(false)}><motion.aside className="drawer" initial={{x:420}} animate={{x:0}} exit={{x:420}} onClick={e=>e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">YOUR LITTLE FINDS</span><h2>Shopping bag <span>({cartCount})</span></h2></div><button className="icon-btn" onClick={()=>setCartOpen(false)}><X/></button></div>{!cart.length?<div className="empty-state"><span>🛍️</span><h3>Your bag is taking a nap</h3><p>Add a little joy to wake it up.</p><button className="primary-btn" onClick={()=>{setCartOpen(false);scrollShop();}}>Explore toys</button></div>:<><div className="cart-items">{cart.map(i=><div className="cart-item" key={i.id}><div className="cart-thumb" style={{background:i.color}}>{i.image_url ? <img src={i.image_url} alt={i.name} style={{width:'100%',height:'100%',objectFit:'contain'}}/> : (i.emoji || '🧸')}</div><div className="cart-item-info"><b>{i.name}</b><strong>{money(i.price)}</strong><div className="qty-control"><button onClick={()=>updateQty(i.id,-1)}><Minus size={13}/></button><span>{i.qty}</span><button onClick={()=>updateQty(i.id,1)}><Plus size={13}/></button></div></div><button className="remove-btn" onClick={()=>updateQty(i.id,-i.qty)} aria-label="Remove item"><Trash2 size={17}/></button></div>)}</div><div className="cart-summary"><div><span>Subtotal</span><b>{money(total)}</b></div><small>Delivery charges, if any, are calculated at checkout.</small><button className="primary-btn checkout-btn" onClick={checkout} disabled={orderBusy}>{orderBusy?'Creating order...':'Continue to checkout'} <ArrowRight size={17}/></button><p className="secure-note"><ShieldCheck size={15}/> Secure checkout after payment setup</p></div></>}</motion.aside></motion.div>}</AnimatePresence>
 
-    <AnimatePresence>{checkoutOpen && <motion.div className="modal-backdrop checkout-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>{stopHoldConfirm();setCheckoutOpen(false);}}><motion.div className="modal checkout-modal" initial={{y:20,scale:.97}} animate={{y:0,scale:1}} exit={{y:20,scale:.97}} onClick={e=>e.stopPropagation()}><button className="modal-close icon-btn" onClick={()=>{stopHoldConfirm();setCheckoutOpen(false);}} aria-label="Close checkout"><X/></button><div className="modal-emoji">📦</div><span className="eyebrow">ALMOST YOURS</span><h2>Delivery details</h2><p className="checkout-intro">Tell us where to deliver your little bundle of joy.</p><form className="checkout-form" onSubmit={e=>e.preventDefault()}><div className="checkout-section-title">Customer details</div><label>Full name<input autoComplete="name" required value={checkoutDetails.customer_name} onChange={e=>setCheckoutDetails({...checkoutDetails,customer_name:e.target.value})} placeholder="Your full name"/></label><label>Email address<input type="email" value={user?.email || ''} readOnly autoComplete="email"/></label><label>Mobile number<input type="tel" required autoComplete="tel" inputMode="tel" value={checkoutDetails.phone} onChange={e=>setCheckoutDetails({...checkoutDetails,phone:e.target.value})} placeholder="10-digit mobile number"/></label><div className="checkout-section-title">Delivery address</div><label>House / Flat, street<input required autoComplete="address-line1" value={checkoutDetails.address} onChange={e=>setCheckoutDetails({...checkoutDetails,address:e.target.value})} placeholder="Door no. and street name"/></label><label>Area / Locality<input required autoComplete="address-line2" value={checkoutDetails.area} onChange={e=>setCheckoutDetails({...checkoutDetails,area:e.target.value})} placeholder="Area or locality"/></label><div className="checkout-fields-row"><label>City<input required autoComplete="address-level2" value={checkoutDetails.city} onChange={e=>setCheckoutDetails({...checkoutDetails,city:e.target.value})} placeholder="City"/></label><label>PIN code<input required autoComplete="postal-code" inputMode="numeric" maxLength="6" pattern="[0-9]{6}" value={checkoutDetails.pincode} onChange={e=>setCheckoutDetails({...checkoutDetails,pincode:e.target.value.replace(/\D/g,'').slice(0,6)})} placeholder="6 digits"/></label></div><label>State<input required autoComplete="address-level1" value={checkoutDetails.state} onChange={e=>setCheckoutDetails({...checkoutDetails,state:e.target.value})} placeholder="State"/></label><div className="checkout-section-title">Order summary</div><div className="checkout-order-items">{cart.map(i=><div key={i.id}><span>{i.emoji || '🧸'} {i.name} × {i.qty}</span><b>{money(i.price*i.qty)}</b></div>)}<div className="checkout-total"><span>Total</span><b>{money(total)}</b></div></div><div className="checkout-section-title">Payment method</div><label className="payment-choice"><input type="radio" name="payment" checked={checkoutDetails.payment_method==='COD'} onChange={()=>setCheckoutDetails({...checkoutDetails,payment_method:'COD'})}/> Cash on Delivery (COD)</label><label className="payment-choice payment-disabled"><input type="radio" name="payment" checked={checkoutDetails.payment_method==='RAZORPAY'} onChange={()=>setCheckoutDetails({...checkoutDetails,payment_method:'RAZORPAY'})}/> Online payment (Razorpay) <small>Not active yet</small></label><button type="button" className="hold-confirm-btn" style={{'--hold-progress':`${holdProgress}%`}} onPointerDown={startHoldConfirm} onPointerUp={stopHoldConfirm} onPointerLeave={stopHoldConfirm} onPointerCancel={stopHoldConfirm} onContextMenu={e=>e.preventDefault()} disabled={orderBusy}><span className="hold-progress-fill" style={{width:`${holdProgress}%`}}/><span className="hold-confirm-label">{orderBusy?'Placing your order…':holdProgress>0?'Keep holding to confirm':'Press and hold for 2 seconds to confirm order'}</span></button><p className="hold-hint"><ShieldCheck size={14}/> Please check your address and order total before confirming.</p></form></motion.div></motion.div>}</AnimatePresence>
+    <AnimatePresence>{checkoutOpen && <motion.div className="modal-backdrop checkout-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>{stopHoldConfirm();setCheckoutOpen(false);}}><motion.div className="modal checkout-modal" initial={{y:20,scale:.97}} animate={{y:0,scale:1}} exit={{y:20,scale:.97}} onClick={e=>e.stopPropagation()}><button className="modal-close icon-btn" onClick={()=>{stopHoldConfirm();setCheckoutOpen(false);}} aria-label="Close checkout"><X/></button><div className="modal-emoji">📦</div><span className="eyebrow">ALMOST YOURS</span><h2>Delivery details</h2><p className="checkout-intro">Tell us where to deliver your little bundle of joy.</p><form className="checkout-form" onSubmit={e=>e.preventDefault()}><div className="checkout-section-title">Customer details</div><label>Full name<input autoComplete="name" required value={checkoutDetails.customer_name} onChange={e=>setCheckoutDetails({...checkoutDetails,customer_name:e.target.value})} placeholder="Your full name"/></label><label>Email address<input type="email" value={user?.email || ''} readOnly autoComplete="email"/></label><label>Mobile number<input type="tel" required autoComplete="tel" inputMode="tel" value={checkoutDetails.phone} onChange={e=>setCheckoutDetails({...checkoutDetails,phone:e.target.value})} placeholder="10-digit mobile number"/></label><div className="checkout-section-title">Delivery address</div><label>House / Flat, street<input required autoComplete="address-line1" value={checkoutDetails.address} onChange={e=>setCheckoutDetails({...checkoutDetails,address:e.target.value})} placeholder="Door no. and street name"/></label><label>Area / Locality<input required autoComplete="address-line2" value={checkoutDetails.area} onChange={e=>setCheckoutDetails({...checkoutDetails,area:e.target.value})} placeholder="Area or locality"/></label><div className="checkout-fields-row"><label>City<input required autoComplete="address-level2" value={checkoutDetails.city} onChange={e=>setCheckoutDetails({...checkoutDetails,city:e.target.value})} placeholder="City"/></label><label>PIN code<input required autoComplete="postal-code" inputMode="numeric" maxLength="6" pattern="[0-9]{6}" value={checkoutDetails.pincode} onChange={e=>setCheckoutDetails({...checkoutDetails,pincode:e.target.value.replace(/\D/g,'').slice(0,6)})} placeholder="6 digits"/></label></div><label>State<input required autoComplete="address-level1" value={checkoutDetails.state} onChange={e=>setCheckoutDetails({...checkoutDetails,state:e.target.value})} placeholder="State"/></label><div className="checkout-section-title">Order summary</div><div className="checkout-order-items">{cart.map(i=><div key={i.id}><span>{i.emoji || '🧸'} {i.name} × {i.qty}</span><b>{money(i.price*i.qty)}</b></div>)}<div className="checkout-total"><span>Total</span><b>{money(total)}</b></div></div><div className="checkout-section-title">Payment method</div><label className="payment-choice"><input type="radio" name="payment" checked={checkoutDetails.payment_method==='COD'} onChange={()=>setCheckoutDetails({...checkoutDetails,payment_method:'COD'})}/> Cash on Delivery (COD)</label><label className="payment-choice"><input type="radio" name="payment" checked={checkoutDetails.payment_method==='RAZORPAY'} onChange={()=>setCheckoutDetails({...checkoutDetails,payment_method:'RAZORPAY'})}/> Online payment (Razorpay) <small>UPI / Cards / Net Banking</small></label><button type="button" className="hold-confirm-btn" style={{'--hold-progress':`${holdProgress}%`}} onPointerDown={startHoldConfirm} onPointerUp={stopHoldConfirm} onPointerLeave={stopHoldConfirm} onPointerCancel={stopHoldConfirm} onContextMenu={e=>e.preventDefault()} disabled={orderBusy}><span className="hold-progress-fill" style={{width:`${holdProgress}%`}}/><span className="hold-confirm-label">{orderBusy?'Placing your order…':holdProgress>0?'Keep holding to confirm':'Press and hold for 2 seconds to confirm order'}</span></button><p className="hold-hint"><ShieldCheck size={14}/> Please check your address and order total before confirming.</p></form></motion.div></motion.div>}</AnimatePresence>
 
-    <AnimatePresence>{authOpen && <motion.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setAuthOpen(false)}><motion.div className="modal" initial={{y:20,scale:.97}} animate={{y:0,scale:1}} exit={{y:20,scale:.97}} onClick={e=>e.stopPropagation()}><button className="modal-close icon-btn" onClick={()=>setAuthOpen(false)}><X/></button><div className="modal-emoji">👋</div><span className="eyebrow">WELCOME TO SOFTIES</span><h2>{user?'You are signed in!':'Come on in, explorer.'}</h2>{user?<><p>{user.email}</p><button className="primary-btn full-btn" onClick={signOut}>Sign out</button></>:<form onSubmit={signIn} className="auth-form"><button type="button" className="primary-btn full-btn" onClick={googleSignIn}>Continue with Google</button><p className="small-muted" style={{textAlign:'center'}}>or sign in with email</p><label>Email address<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" required minLength="8" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 8 characters"/></label><button className="primary-btn full-btn" type="submit">Sign in <ArrowRight size={16}/></button><button type="button" className="text-btn centered" onClick={signUp}>New here? Create an account</button></form>}<p className="small-muted">{supabaseConfigured?'Account services are connected.':'Demo mode: add Supabase credentials in your .env file to enable accounts.'}</p></motion.div></motion.div>}</AnimatePresence>
+    <AnimatePresence>{authOpen && <motion.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setAuthOpen(false)}><motion.div className="modal" initial={{y:20,scale:.97}} animate={{y:0,scale:1}} exit={{y:20,scale:.97}} onClick={e=>e.stopPropagation()}><button className="modal-close icon-btn" onClick={()=>setAuthOpen(false)}><X/></button><div className="modal-emoji">👋</div><span className="eyebrow">WELCOME TO SOFTIES</span><h2>{user?'You are signed in!':'Come on in, explorer.'}</h2>{user?<><p>{user.email}</p><button className="primary-btn full-btn" onClick={signOut}>Sign out</button></>:<form onSubmit={signIn} className="auth-form"><button type="button" className="primary-btn full-btn" onClick={googleSignIn}>Continue with Google</button><p className="small-muted" style={{textAlign:'center'}}>or sign in with email</p><label>Email address<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" required minLength="8" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 8 characters"/></label><button className="primary-btn full-btn" type="submit">Sign in <ArrowRight size={16}/></button><button type="button" className="text-btn centered" onClick={resetPassword}>Forgot password?</button><button type="button" className="text-btn centered" onClick={signUp}>New here? Create an account</button></form>}<p className="small-muted">{supabaseConfigured?'Account services are connected.':'Demo mode: add Supabase credentials in your .env file to enable accounts.'}</p></motion.div></motion.div>}</AnimatePresence>
 
     <AnimatePresence>{quizOpen && <motion.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setQuizOpen(false)}><motion.div className="modal quiz-modal" initial={{y:20,scale:.97}} animate={{y:0,scale:1}} exit={{y:20,scale:.97}} onClick={e=>e.stopPropagation()}><button className="modal-close icon-btn" onClick={()=>setQuizOpen(false)}><X/></button><div className="modal-emoji">🔎</div><span className="eyebrow">YOUR PERSONAL TOY HELPER</span><h2>Let's find their next favourite!</h2><label className="quiz-label">Age group<select value={age} onChange={e=>setAge(e.target.value)}><option>Any age</option><option>All ages</option><option>3–6 years</option><option>6–10 years</option><option>4–8 years</option><option>7–12 years</option><option>3–7 years</option><option>5–9 years</option></select></label><label className="quiz-label">Budget<select value={budget} onChange={e=>setBudget(e.target.value)}><option>Any budget</option><option value="500">Under ₹500</option><option value="800">Under ₹800</option><option value="1200">Under ₹1,200</option></select></label><div className="quiz-results"><b>Ideas for you</b><div>{recommended.slice(0,3).map(p=><button key={p.id} className="quiz-result" onClick={()=>{setQuizOpen(false);scrollShop();setCategory(p.category);}}><span style={{background:p.color}}>{p.emoji}</span><span>{p.name}<small>{money(p.price)}</small></span><ArrowRight size={15}/></button>)}</div>{!recommended.length && <p>No exact match. Try a higher budget or any age.</p>}</div><button className="primary-btn full-btn" onClick={()=>{setQuizOpen(false);scrollShop();}}>Browse recommendations <ArrowRight size={17}/></button></motion.div></motion.div>}</AnimatePresence>
 
-    {adminMode && <div className="admin-panel"><div className="admin-head"><h2>🛠️ Quick Product Manager</h2><button className="icon-btn" onClick={()=>setAdminMode(false)}><X/></button></div><p className="small-muted">Admin view. Database-level admin permissions must also be configured securely in Supabase before product changes can be saved.</p><form className="admin-form" onSubmit={addProduct}><input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Toy name" required/><input value={newPrice} onChange={e=>setNewPrice(e.target.value)} type="number" min="1" placeholder="Price in ₹" required/><select value={newCategory} onChange={e=>setNewCategory(e.target.value)}>{categories.map(c=><option key={c.name}>{c.name}</option>)}</select><button className="primary-btn">Add toy</button></form><div className="admin-product-list">{products.map(p=><div key={p.id}><span>{p.emoji} {p.name}</span><b>{money(p.price)}</b><button onClick={async()=>{if(supabaseConfigured && user && !String(p.id).startsWith('local-')){const {error}=await supabase.from('products').update({is_active:false}).eq('id',p.id);if(error)return setNotice(error.message);}setProducts(old=>old.filter(x=>x.id!==p.id));setNotice('Product removed from this view.');}}><Trash2 size={15}/></button></div>)}</div></div>}
+
     <button className="admin-shortcut" onClick={()=>{window.location.href='/admin';}} title="Admin dashboard">⚙</button>
   </div>;
 }

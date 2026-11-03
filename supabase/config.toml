@@ -1,0 +1,13 @@
+# Supabase CLI project configuration for SOFTIES.
+# Link this local project to your existing Supabase project with:
+# supabase link --project-ref YOUR_CURRENT_SUPABASE_PROJECT_REF
+project_id = "softies-toy-store"
+
+[functions.create-cod-order]
+verify_jwt = true
+
+[functions.create-razorpay-order]
+verify_jwt = true
+
+[functions.verify-razorpay-payment]
+verify_jwt = true
